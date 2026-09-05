@@ -1,4 +1,4 @@
-# Freebuff 可用模型（2026-09-05 04:07:01 北京时间）
+# Freebuff 可用模型（2026-09-05 10:19:13 北京时间）
 
 > 自动生成 · 来源：[CodebuffAI/freebuff](https://github.com/CodebuffAI/freebuff) main · 更新频率：每 6 小时
 
@@ -10,6 +10,7 @@
 - `anthropic/claude-fable-5` —— Claude Fable 5（Anthropic 限量模型）
 - `crof/kimi-k3-eco` —— Kimi K3 Eco（CROF 平衡型模型）
 - `deepseek/deepseek-v4-flash` —— DeepSeek V4 Flash（推理模型，代码/数学/推理优秀）
+- `google/gemini-3.8-flash` —— google/gemini-3.8-flash
 - `meta/muse-spark-1.2-contributor` —— Muse Spark 1.2（Meta 开发者专属，限量）
 - `meta/muse-spark-1.3-contributor` —— meta/muse-spark-1.3-contributor
 - `mimo/mimo-v2.5` —— MiMo V2.5（轻量高效，适合快速任务）
@@ -21,4 +22,4 @@
 
 
 ---
-共 9 个模型 · 上次更新：2026-09-05 04:07:01
+共 10 个模型 · 上次更新：2026-09-05 10:19:13
