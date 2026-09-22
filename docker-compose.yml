@@ -10,11 +10,14 @@ services:
     environment:
       - PORT=8787
       - HOST=0.0.0.0
+      # 以下变量仅首次引导用：面板（/admin）保存后以 credentials/admin.json 为准
       # 上游地址：默认空=直连官方 www.codebuff.com；如走自建中继可设为中继域名
       - CODEBUFF_API=
       - RELAY_KEY=${RELAY_KEY}
       - FREEBUFF_API_KEY=${FREEBUFF_API_KEY}
       - FREEBUFF_DEBUG=false
     volumes:
-      # 统一凭证：直接复用本地工具的 freebuff_credentials.json（多账号聚合格式）
-      - ./freebuff_tools/freebuff_credentials.json:/app/credentials/freebuff_credentials.json:ro
+      # 面板数据（管理员密码/账号/socks5 映射）持久化 —— 必须挂载，否则重建容器丢失配置
+      - ./credentials:/app/credentials
+      # 旧凭证（首次启动自动迁移 token 到 admin.json；迁移后可移除）
+      - ./freebuff_tools/freebuff_credentials.json:/app/freebuff_tools/freebuff_credentials.json:ro

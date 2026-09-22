@@ -1,10 +1,13 @@
 const CODEBUFF_API = "https://www.codebuff.com";
 const DEFAULT_MODEL = "mimo/mimo-v2.5";
 const DEFAULT_API_KEY = "freebuff-default-key";
-const VERSION = "1.8.10.3";
+const VERSION = "1.8.11.0";
 const CONTEXT_PRUNER_AGENT = "context-pruner";
 const SDK_UA = "ai-sdk/openai-compatible/1.0.25/codebuff";
-const DESKTOP_UA = "Freebuff-CLI/0.0.138";
+// 广告链已于 v1.8.11.0 移除：v1.8.10.3 加回的 runNormalClientBehavior 无调用点（死代码）。
+// 官方 ad-event 采样率 = 1（全量），伪装 impression 缺 X-Freebuff-Event-Id /
+// X-Freebuff-Render-Delay-Ms 卫生头，每条都是显眼伪造记录；免费档 impression 零结算，
+// 纯赔本。安静 SDK 画像 > 伪装桌面客户端。
 
 // 动态模型注册表：从官方 freebuff 镜像拉取模型清单
 // 真源: https://github.com/CodebuffAI/freebuff (freebuff-private 的 public 镜像)
@@ -127,7 +130,11 @@ function parseModelPools(source, modelIdConstants) {
     constValues.set(name, items);
   }
   // 解析池
-  const poolRe = /export\s+const\s+(FREEBUFF_WEB_PREMIUM_MODEL_IDS|FREEBUFF_GLM_V52_MODEL_IDS|FREEBUFF_PREMIUM_MODEL_IDS)\s*=\s*\[([^\]]*)\]/g;
+  // v1.8.11.0：兼容官方两种池定义写法——
+  //   旧： export const FREEBUFF_PREMIUM_MODEL_IDS = [ 'a/b', CONST_X, ...Y ]
+  //   新（2026-09-04 commit 8870810）：派生过滤 Object.freeze(FREEBUFF_MODELS.filter((m) => m.premium)...)
+  // 派生写法无法静态求值 → 返回 null，由调用方回退到目录行内 premium: true 标志解析。
+  const poolRe = /export\s+const\s+(FREEBUFF_WEB_PREMIUM_MODEL_IDS|FREEBUFF_GLM_V52_MODEL_IDS|FREEBUFF_PREMIUM_MODEL_IDS)\s*=\s*(Object\.freeze\()?\s*\[([^\]]*)\]/g;
   let pm;
   while ((pm = poolRe.exec(source)) !== null) {
     const poolName = pm[1];
@@ -159,6 +166,28 @@ function parseModelPools(source, modelIdConstants) {
   }
   // FREEBUFF_PREMIUM_MODEL_IDS 与 FREEBUFF_WEB_PREMIUM_MODEL_IDS 都算 premium
   return { premium: [...premium], glm: [...glm] };
+}
+
+// v1.8.11.0 目录标志回退：池定义为派生写法（filter(m => m.premium)）时无法静态求值，
+// 直接解析目录行内 premium: 标志。逐块匹配 `const X_MODEL = { ... } as const`，
+// 关联块内 id: 常量与 premium: 值。表达式形态（如 SOLAR entitlement，解析为 false）
+// 一律按 false 处理——premium 表达式在 entitlements 里目前只有 solar 一处且为 false。
+function parseCatalogPremiumFlags(source, modelIdConstants) {
+  const premium = new Set();
+  const blockRe = /const\s+([A-Z0-9_]+)\s*=\s*\{([^{}]*)\}\s*as\s*const/g;
+  let bm;
+  while ((bm = blockRe.exec(source)) !== null) {
+    const body = bm[2];
+    if (!/^\s*premium:/m.test(body)) continue;
+    const idM = /\n\s*id:\s*('([^']+)'|"([^"]+)"|([A-Z0-9_]+)),/.exec(body);
+    if (!idM) continue;
+    const modelId = idM[2] || idM[3] || modelIdConstants[idM[4]];
+    if (!modelId) continue;
+    const pM = /\n\s*premium:\s*([^,\n]+),/.exec(body);
+    if (!pM) continue;
+    if (pM[1].trim() === "true") premium.add(modelId);
+  }
+  return { premium: [...premium] };
 }
 
 // 动态模型表：分别记录普通 root、base3 root、reviewer。
@@ -246,11 +275,15 @@ async function refreshDynamicModelsIfStale() {
       return dynamicModelsCache;
     }
     const pools = parseModelPools(modelsSrc, modelIdConstants);
+    // v1.8.11.0：池定义为派生写法时静态解析为空 → 回退目录行内 premium 标志。
+    const premiumIds = pools.premium.length > 0
+      ? pools.premium
+      : parseCatalogPremiumFlags(modelsSrc, modelIdConstants).premium;
     dynamicModelsCache = {
       fetchedAt: Date.now(),
       models: buildDynamicModelTable(agentMappings),
       pool: {
-        premium: new Set(pools.premium),
+        premium: new Set(premiumIds),
         standard: null,
         glm: new Set(pools.glm),
       },
@@ -758,6 +791,17 @@ const SESSION_TIMEOUT_MS = 10000;  // session/run 等短交互更快失败
 // 额度仍在时不 abort、不切号，继续等待上游。
 const STREAM_NO_DATA_PROBE_DELAY_MS = 20000;
 
+// ---------------------------------------------------------------------------
+// v1.8.11.0 出站分流钩子：env.OUTBOUND_FETCH（可选）由宿主（server.js）注入，
+// 签名 (url, init, token) => Promise<Response>。Docker 侧按账号 socks5 分流；
+// CF Workers / Vercel 无注入时回落全局 fetch，行为与旧版一致。
+// ---------------------------------------------------------------------------
+let outboundFetch = null; // (url, init, token) => Promise<Response>
+export function setOutboundFetch(fn) { outboundFetch = fn; }
+function doFetch(url, init, token) {
+  return outboundFetch ? outboundFetch(url, init, token) : fetch(url, init);
+}
+
 async function up(method, path, token, body, extraHeaders = {}, timeoutMs = UPSTREAM_TIMEOUT_MS) {
   const headers = {};
   // 桌面版协议：所有请求带 SDK User-Agent（free 模式识别依赖此 UA）
@@ -766,12 +810,12 @@ async function up(method, path, token, body, extraHeaders = {}, timeoutMs = UPST
   if (body !== undefined) headers["Content-Type"] = "application/json";
   Object.assign(headers, extraHeaders);
 
-  const resp = await fetch(CODEBUFF_API + path, {
+  const resp = await doFetch(CODEBUFF_API + path, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(timeoutMs),
-  });
+  }, token);
   const text = await resp.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
@@ -799,7 +843,7 @@ async function freshQuotaProbe(token, sessionModel) {
 // 才强制刷新账号额度；额度未知或仍有额度时，原请求继续等待。
 async function fetchStreamWithQuotaGuard(url, init, token, sessionModel) {
   const controller = new AbortController();
-  const request = fetch(url, { ...init, signal: controller.signal });
+  const request = doFetch(url, { ...init, signal: controller.signal }, token);
   let probeTimer = null;
   const armProbe = () => new Promise((_, reject) => {
     probeTimer = setTimeout(() => {
@@ -884,8 +928,11 @@ function behaviorDue(key) {
   return false;
 }
 
-// 稳定指纹：token 派生，同一账号永远一致（官方 enhanced- 前缀 + 哈希）
-// CF Workers 无同步 WebCrypto，用轻量确定性哈希（FNV-1a 双种子 + hex）
+// 稳定指纹：token 派生（官方 enhanced- 前缀 + 哈希）。
+// v1.8.11.0 起 client_id 语义对齐官方 SDK：client_id = clientSessionId（会话级）。
+// conversationSessionId(token, salt) 在「账号 × 30 分钟窗口」内恒定、跨窗口更换，
+// 替代旧的 全账号恒定 stableFingerprint("session")（跨会话不换 = 异常指纹，
+// 官方 looksLikeProxyClientId 专抓固定 client_id 模式的公开代理）。
 function stableFingerprint(token) {
   let h1 = 0x811c9dc5, h2 = 0x01000193;
   const s = "freebuff-fp-v2:" + token;
@@ -897,38 +944,11 @@ function stableFingerprint(token) {
   return "enhanced-" + h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
 }
 
-// 广告链：POST /ads 拉取 → 若有 impUrl 则 POST /ads/impression 上报曝光。
-// 官方实现：getCliAdRequestUserAgent 发 Freebuff-CLI/<version> UA；
-// body {provider:"gravity", surface, sessionId, device, userAgent}；曝光 {impUrl, mode}
-async function runNormalClientBehavior(token, clientFingerprint) {
-  const failures = [];
-  // 1) 广告拉取 + 曝光（每 30 分钟一次，避免每个请求都打广告接口）
-  if (behaviorDue("ads:" + token)) {
-    try {
-      const ad = await enqueueUp("POST", "/api/v1/ads", token, {
-        provider: "gravity",
-        sessionId: crypto.randomUUID(),
-        surface: "waiting_room",
-        device: { os: "macos", timezone: "Asia/Shanghai", locale: "zh-CN" },
-        userAgent: DESKTOP_UA,
-      }, { "User-Agent": DESKTOP_UA, "Content-Type": "application/json" }, 6000);
-      const impUrl = ad.data && Array.isArray(ad.data.ads) && ad.data.ads[0] && ad.data.ads[0].impUrl;
-      if (ad.status === 200 && impUrl) {
-        await enqueueUp("POST", "/api/v1/ads/impression", token,
-          { impUrl, mode: "free" },
-          { "User-Agent": DESKTOP_UA, "Content-Type": "application/json" }, 6000);
-      }
-    } catch (e) { failures.push("ads:" + String(e && e.message || e).slice(0, 80)); }
-  }
-  // 2) usage 触碰（30 分钟一次）
-  if (behaviorDue("usage:" + token)) {
-    try {
-      await enqueueUp("POST", "/api/v1/usage", token,
-        { fingerprintId: clientFingerprint },
-        { "Content-Type": "application/json" }, 6000);
-    } catch (e) { failures.push("usage:" + String(e && e.message || e).slice(0, 80)); }
-  }
-  return failures;
+// 会话级 client_id：账号 token + 30 分钟滚动窗口 → 稳定增强指纹。
+// 同一会话（窗口内）恒定，新窗口自然轮换，与官方 clientSessionId 语义一致。
+function conversationSessionId(token) {
+  const window = Math.floor(Date.now() / (30 * 60 * 1000));
+  return stableFingerprint(token + "|cs|" + window);
 }
 
 async function createSession(token, sessionModel, forceCreate = false) {
@@ -1138,7 +1158,7 @@ function normalizeReasoningEffort(model, effort) {
   return clamped === String(effort) ? effort : clamped;
 }
 
-function buildUpstreamPayload(params, mc, sess, runId) {
+function buildUpstreamPayload(params, mc, sess, runId, token) {
   const payload = {};
   for (const k of UPSTREAM_KEYS) if (params[k] !== undefined && params[k] !== null) payload[k] = params[k];
   // reasoning_effort 按官方模型 efforts 表 clamp-down（不拒绝、不换模型）
@@ -1169,8 +1189,9 @@ function buildUpstreamPayload(params, mc, sess, runId) {
     freebuff_instance_id: sess.instanceId,
     trace_session_id: crypto.randomUUID(),
     run_id: runId,
-    // 官方 SDK：client_id = clientSessionId（会话级稳定标识），不是随机数
-    client_id: stableFingerprint(runId || "session"),
+    // 官方 SDK：client_id = clientSessionId（会话级稳定标识，新会话换新）。
+    // v1.8.11.0：账号 × 30 分钟滚动窗口派生，窗口内恒定、跨窗口轮换。
+    client_id: conversationSessionId(token),
     cost_mode: "free",
   };
   return payload;
@@ -1202,7 +1223,7 @@ function buildReviewerMessages(params) {
   return messages;
 }
 
-function buildReviewerPayload(params, mc, sess, reviewerRunId) {
+function buildReviewerPayload(params, mc, sess, reviewerRunId, token) {
   const metadata = params.metadata && typeof params.metadata === "object"
     ? { ...params.metadata }
     : undefined;
@@ -1223,6 +1244,7 @@ function buildReviewerPayload(params, mc, sess, reviewerRunId) {
     mc,
     sess,
     reviewerRunId,
+    token,
   );
 }
 
@@ -1390,18 +1412,18 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
       reviewerRunId = await startRun(token, reviewerAgent, [rootRunId]);
       if (debug) console.log(`[review][acct ${acctTry + 1}] root=${rootRunId} reviewer=${reviewerRunId} model=${reviewerModel}`);
 
-      const payload = buildReviewerPayload(chatParams, { ...mc, upstream: reviewerModel }, sess, reviewerRunId);
+      const payload = buildReviewerPayload(chatParams, { ...mc, upstream: reviewerModel }, sess, reviewerRunId, token);
       const headers = {
         Authorization: "Bearer " + token,
         "Content-Type": "application/json",
         "x-freebuff-instance-id": sess.instanceId,
       };
-      const resp = await fetch(CODEBUFF_API + "/api/v1/chat/completions", {
+      const resp = await doFetch(CODEBUFF_API + "/api/v1/chat/completions", {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
         signal: isStream ? undefined : AbortSignal.timeout(NONSTREAM_TIMEOUT_MS),
-      });
+      }, token);
       if (!resp.ok) {
         const text = await resp.text();
         recordAccountObservation(token, resp.status, text);
@@ -1477,7 +1499,7 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
       //    清缓存强制重建后重试一次；仍失败则冷却该号交给外层换号）
       let resp, errText = "", sessForChat = sess;
       for (let attempt = 0; attempt < 2; attempt++) {
-        const payload = buildUpstreamPayload(chatParams, mc, sessForChat, run.runId);
+        const payload = buildUpstreamPayload(chatParams, mc, sessForChat, run.runId, token);
         const headers = {
           Authorization: "Bearer " + token,
           "Content-Type": "application/json",
@@ -1496,10 +1518,10 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
         try {
           resp = isStream
             ? await fetchStreamWithQuotaGuard(CODEBUFF_API + "/api/v1/chat/completions", chatInit, token, mc.session)
-            : await fetch(CODEBUFF_API + "/api/v1/chat/completions", {
+            : await doFetch(CODEBUFF_API + "/api/v1/chat/completions", {
                 ...chatInit,
                 signal: AbortSignal.timeout(NONSTREAM_TIMEOUT_MS),
-              });
+              }, token);
         } catch (error) {
           // 空流只视为当前账号的同模型 session 疑似脏状态：
           // 删除上游旧实例，重建同模型 session，再重试一次；绝不改成别的模型。

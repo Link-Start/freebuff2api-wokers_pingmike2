@@ -105,14 +105,18 @@ function parseModelPools(source, modelIdConstants) {
     }
     constValues.set(name, items);
   }
-  const poolRe = /export\s+const\s+(FREEBUFF_WEB_PREMIUM_MODEL_IDS|FREEBUFF_GLM_V52_MODEL_IDS|FREEBUFF_PREMIUM_MODEL_IDS)\s*=\s*\[([^\]]*)\]/g;
+  // v1.8.11.0：兼容官方两种池定义写法——
+  //   旧： export const FREEBUFF_PREMIUM_MODEL_IDS = [ 'a/b', CONST_X, ...Y ]
+  //   新（2026-09-04 commit 8870810）：派生过滤 Object.freeze(FREEBUFF_MODELS.filter((m) => m.premium)...)
+  // 派生写法无法静态求值 → 正则不命中，返回空集，由调用方回退 parseCatalogPremiumFlags。
+  const poolRe = /export\s+const\s+(FREEBUFF_WEB_PREMIUM_MODEL_IDS|FREEBUFF_GLM_V52_MODEL_IDS|FREEBUFF_PREMIUM_MODEL_IDS)\s*=\s*(Object\.freeze\()?\s*\[([^\]]*)\]/g;
   let pm;
   while ((pm = poolRe.exec(source)) !== null) {
     const poolName = pm[1];
     const items = [];
     const itemRe = /\.\.\.([A-Z0-9_]+)|'([^']*)'|"([^"]*)"|([A-Za-z0-9_]+)/g;
     let im;
-    while ((im = itemRe.exec(pm[2])) !== null) {
+    while ((im = itemRe.exec(pm[3])) !== null) {
       const spread = im[1];
       const lit = im[2] ?? im[3];
       const expr = im[4];
@@ -134,7 +138,28 @@ function parseModelPools(source, modelIdConstants) {
       for (const id of items) premium.add(id);
     }
   }
+  // FREEBUFF_PREMIUM_MODEL_IDS 与 FREEBUFF_WEB_PREMIUM_MODEL_IDS 都算 premium
   return { premium: [...premium], glm: [...glm] };
+}
+
+// v1.8.11.0 目录标志回退：池定义为派生写法时直接解析目录行内 premium: 标志。
+// 与 worker.js parseCatalogPremiumFlags 同逻辑（两边必须同步改）。
+function parseCatalogPremiumFlags(source, modelIdConstants) {
+  const premium = new Set();
+  const blockRe = /const\s+([A-Z0-9_]+)\s*=\s*\{([^{}]*)\}\s*as\s*const/g;
+  let bm;
+  while ((bm = blockRe.exec(source)) !== null) {
+    const body = bm[2];
+    if (!/^\s*premium:/m.test(body)) continue;
+    const idM = /\n\s*id:\s*('([^']+)'|"([^"]+)"|([A-Z0-9_]+)),/.exec(body);
+    if (!idM) continue;
+    const modelId = idM[2] || idM[3] || modelIdConstants[idM[4]];
+    if (!modelId) continue;
+    const pM = /\n\s*premium:\s*([^,\n]+),/.exec(body);
+    if (!pM) continue;
+    if (pM[1].trim() === "true") premium.add(modelId);
+  }
+  return { premium: [...premium] };
 }
 
 // 官方暂停/下线模型（FREEBUFF_PAUSED_FREE_MODEL_IDS）：从快照剔除。
@@ -142,16 +167,16 @@ function parseModelPools(source, modelIdConstants) {
 // 新会话请求这些模型必然失败，不应进入模型目录。
 function parsePausedModels(source, modelIdConstants) {
   const paused = new Set();
-  const listRe = /export\s+const\s+FREEBUFF_PAUSED_FREE_MODEL_IDS\s*:?\s*[^=]*=\s*\[([^\]]*)\]/;
+  // v1.8.11.0：PAUSED 列表现为 `: readonly string[] = [`（无 as const），
+  // 且列表项带行内注释 → 逐行提取首个引号串，不跨行吞注释文本。
+  const listRe = /export\s+const\s+FREEBUFF_PAUSED_FREE_MODEL_IDS\s*:?[^=]*=\s*\[([^\]]*)\]/;
   const listMatch = listRe.exec(source);
   if (!listMatch) return paused;
-  const itemRe = /'([^']*)'|"([^"]*)"|([A-Za-z0-9_]+)/g;
-  let im;
-  while ((im = itemRe.exec(listMatch[1])) !== null) {
-    const lit = im[1] ?? im[2];
-    const expr = im[3];
-    if (lit) paused.add(lit);
-    else if (expr && modelIdConstants[expr]) paused.add(modelIdConstants[expr]);
+  for (const line of listMatch[1].split("\n")) {
+    const m = /'([^']*)'|"([^"]*)"/.exec(line);
+    if (!m) continue;
+    const lit = m[1] ?? m[2];
+    if (lit && lit.includes("/")) paused.add(lit);
   }
   return paused;
 }
@@ -198,6 +223,10 @@ async function main() {
       process.exit(1);
     }
     const pools = parseModelPools(modelsSrc, modelIdConstants);
+    // v1.8.11.0：派生写法回退目录 premium 标志
+    const premiumIds = pools.premium.length > 0
+      ? pools.premium
+      : parseCatalogPremiumFlags(modelsSrc, modelIdConstants).premium;
     const paused = parsePausedModels(modelsSrc, modelIdConstants);
     if (paused.size > 0) {
       console.log(`ℹ️  官方暂停模型（已从快照剔除）: ${[...paused].join(", ")}`);
@@ -213,7 +242,7 @@ async function main() {
         upstream: modelId,
       }))
       .filter((m) => !paused.has(m.id));
-    const premium = new Set(pools.premium);
+    const premium = new Set(premiumIds);
     for (const id of paused) premium.delete(id);
     const glm = new Set(pools.glm);
     const standard = models
