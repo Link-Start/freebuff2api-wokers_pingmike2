@@ -12,7 +12,7 @@
 ## ✨ 特性
 
 - ⭐ **完整访问模式模型**：Cloudflare Workers 默认使用美国出口，通常可获得 Freebuff 完整访问模式；其中 DeepSeek V4 Flash 和 MiMo 2.5 属于官方特殊的非 Premium 模型
-- 🛡️ **Web 管理面板 `/admin`**：账号池 / 代理 / API Key / **Freebucks 额度**全在页面上改，**保存即生效，无需重启容器**（见下方「[🛡️ 管理面板](#-管理面板-admin)」）
+- 🛡️ **Web 管理面板 `/admin`**：账号池 / 代理 / API Key / **Freebucks 额度**全在页面上改，**保存即生效，无需重启容器**（见下方「[🛡️ 管理面板](#️-管理面板-admin)」）
 - 💰 **Freebucks 额度可见**：按次扣费的**每日钱包**（不是「每个模型每天 N 次」白名单），面板可直接查余额、每日用量、价格表和**今天打得起哪几个模型**（见下方「[💰 Freebucks 额度机制](#-freebucks-额度机制)」）
 - 🔁 **多账号自动切换**：撞额度自动冷却并切换；账号在面板里加，**不是**靠 `FREEBUFF_TOKEN` 环境变量
 - 💡 **优先复用活跃 session**：一个 session 约 1 小时有效，创建 session 才扣额度；只要当前模型的 session 还活跃就钉在同一账号上，用满再换，最大化额度利用率
@@ -137,7 +137,7 @@ curl https://你的worker.workers.dev/healthz
 
 - `version` 字段=当前部署的 **worker.js 版本**，用于确认线上是否已更新（CF 边缘缓存有延迟，验证时等几秒或加随机参数）
 - `status` 为 `ok` / `degraded` / `critical`，`account_states` 是各账号状态计数（`ok` / `rate_limited` / `banned` / `model_locked` …）
-- ⚠️ **这里只有状态，没有额度数字** —— 查 Freebucks 请用面板的「查额度」按钮（见「[🛡️ 管理面板](#-管理面板-admin)」）
+- ⚠️ **这里只有状态，没有额度数字** —— 查 Freebucks 请用面板的「查额度」按钮（见「[🛡️ 管理面板](#️-管理面板-admin)」）
 - 适合接入 UptimeRobot / 自建监控探活
 
 ## 🔑 获取 FREEBUFF_TOKEN
