@@ -41,21 +41,6 @@
 >
 > Anthropic API 是新增的协议适配层，不改变现有 OpenAI `/v1/chat/completions`、`/v1/responses`、账号轮换、session 生命周期和 Freebuff 主调用链。
 
-## ⭐ 特殊模型：DeepSeek V4 Flash 与 MiMo 2.5
-
-Worker 通过 Cloudflare Workers 访问 Freebuff，上游通常会将请求识别为美国/完整访问模式。官方 Desktop 在完整模式下将下面两个模型归入 **unlimited 非 Premium 类别**；这里的 `unlimited` 主要表示模型分类和并发类别，**不是对所有账号、地区、接口和时间都作绝对无限量保证**：
-
-| 模型 | 完整模式下的说明 |
-|---|---|
-| `deepseek/deepseek-v4-flash` | 官方非 Premium 模型；主力推荐，当前 Worker 探测未显示基础日限额 |
-| `mimo/mimo-v2.5` | 官方非 Premium 模型；当前 Worker 探测未显示基础日限额 |
-
-> ⚠️ 这里的「unlimited / 非 Premium」是**官方 Desktop 的模型分类**，不代表无限量 —— 真正决定你能用几次的是 **Freebucks 每日钱包**（见下方「[💰 Freebucks 额度机制](#-freebucks-额度机制)」）。这两个模型恰好都是**单价最低档（5）**，所以同一份额度下它们能打的次数最多。
-
-> 💡 **扣费规则**：按「创建 session」扣，不按对话轮次扣 —— 一个 session 约 1 小时有效，期间多轮对话不重复扣。
-
-> 📝 **广告与 streak 说明**：创建新 session 前，Worker 会按官方客户端流程请求广告，并调用 `GET /api/v1/freebuff/streak` 尝试签到。连续使用是否获得额外额度、额度增加多少，由 freebuff 官方服务端决定；该流程不是额度保证，也不会改变 session 本身的扣额度规则。
-
 ## 💰 Freebucks 额度机制
 
 Freebuff 免费版的额度单位叫 **Freebucks** —— 一个**按次扣费的每日钱包**，**不是「每个模型每天 N 次」的白名单**。所以「换了个模型就报 429」通常不是被限制了，而是**这次更贵，钱包不够扣**。
@@ -523,39 +508,19 @@ curl -N https://你的worker.workers.dev/v1/chat/completions \
 > 映射来源：Freebuff Desktop 0.0.51（`orchestrator.js` 官方 `FREEBUFF_ROOT_AGENT_ID_BY_MODEL`，2026-08-07 实测同步）。
 > Worker 通过 Cloudflare Workers 访问上游，默认使用美国出口，按 Freebuff 完整访问模式说明。**额度不按模型分白名单，而是统一的 Freebucks 每日钱包** —— 每个模型有自己的**单价**，建 session 时按单价扣（见「[💰 Freebucks 额度机制](#-freebucks-额度机制)」）。实时完整列表 `curl /v1/models`（当前 20 个）。
 
-### ⭐ 完整模式特殊模型：非 Premium
-
-官方 Desktop 在完整访问模式下将下面两个模型归入 `unlimited` 非 Premium 类别。这里的 `unlimited` 主要表示官方模型分类和 Desktop 并发类别，**不是任何账号、接口或时间段的绝对无限量承诺**。Worker 当前探测也未在 `rateLimitsByModel` 中看到它们的基础日限额。
-
 | API 模型名 | session 模型 | 上游 agentId | 说明 |
 |---|---|---|---|
-| `deepseek/deepseek-v4-flash` | 同左 | `base2-free-deepseek-flash` | 完整模式特殊模型；主力推荐 |
-| `mimo/mimo-v2.5` | 同左 | `base2-free-mimo` | 完整模式特殊模型；均衡性能 |
-
-> ⚠️ 「unlimited / 非 Premium」是官方 Desktop 的**模型分类**，不等于无限量 —— 实际能用几次取决于单价 × 每日 Freebucks 余额。
-
-### 🔒 普通模型：按单价扣 Freebucks
-
-以下模型没有「无限量」说明，统一**按各自的单价从 Freebucks 每日钱包扣**；实际能打几次 = `余额 ÷ 单价`（面板「查额度」会直接算给你看）。具体单价以实时 `freebucks.prices` 为准。
-
-| API 模型名 | session 模型 | 上游 agentId |
-|---|---|---|
-| `minimax/minimax-m3` | 同左 | `base2-free-minimax-m3` |
-| `deepseek/deepseek-v4-pro` | 同左 | `base2-free-deepseek` |
-| `openai/gpt-5.6-luna` | 同左 | `base2-free-luna` |
-| `poolside/laguna-s-2.1` | 同左 | `base2-free-laguna-s-2-1` |
-| `openrouter/poolside/laguna-s-2.1` | 同左 | `base2-free-laguna-s-2-1-openrouter` |
-| `inclusionai/ling-3.0-flash:free` | 同左 | `base2-free-ling-3-flash` |
-| `crof/greg-2-ultra` | 同左 | `base2-free-greg-2-ultra` |
-| `crof/greg-2-super` | 同左 | `base2-free-greg-2-super` |
-| `meta/muse-spark-1.2-contributor` | 同左 | `base2-free-muse-spark` |
-
-### 🎁 独立资格或容量限制
-
-以下模型不属于普通模型的直接开放池，是否能创建 session 由官方资格、共享容量或上游状态决定；即使获得资格，也不代表无限量使用：
-
-| API 模型名 | session 模型 | 上游 agentId | 限制 |
-|---|---|---|---|
+| `deepseek/deepseek-v4-flash` | 同左 | `base2-free-deepseek-flash` | 主力推荐 |
+| `mimo/mimo-v2.5` | 同左 | `base2-free-mimo` | 均衡性能 |
+| `minimax/minimax-m3` | 同左 | `base2-free-minimax-m3` | - |
+| `deepseek/deepseek-v4-pro` | 同左 | `base2-free-deepseek` | - |
+| `openai/gpt-5.6-luna` | 同左 | `base2-free-luna` | - |
+| `poolside/laguna-s-2.1` | 同左 | `base2-free-laguna-s-2-1` | - |
+| `openrouter/poolside/laguna-s-2.1` | 同左 | `base2-free-laguna-s-2-1-openrouter` | - |
+| `inclusionai/ling-3.0-flash:free` | 同左 | `base2-free-ling-3-flash` | - |
+| `crof/greg-2-ultra` | 同左 | `base2-free-greg-2-ultra` | - |
+| `crof/greg-2-super` | 同左 | `base2-free-greg-2-super` | - |
+| `meta/muse-spark-1.2-contributor` | 同左 | `base2-free-muse-spark` | - |
 | `z-ai/glm-5.2` | 同左 | `base2-free-glm` | 需 referral / streak 等官方资格，使用独立额度池 |
 | `anthropic/claude-fable-5` | 同左 | `base2-free-fable` | 官方容量限制试用，可能按时段开放 |
 
