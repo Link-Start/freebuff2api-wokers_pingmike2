@@ -1,7 +1,7 @@
 const CODEBUFF_API = "https://www.codebuff.com";
 const DEFAULT_MODEL = "mimo/mimo-v2.5";
 const DEFAULT_API_KEY = "freebuff-default-key";
-const VERSION = "1.8.11.0";
+const VERSION = "1.8.11.1";
 const CONTEXT_PRUNER_AGENT = "context-pruner";
 const SDK_UA = "ai-sdk/openai-compatible/1.0.25/codebuff";
 // 广告链已于 v1.8.11.0 移除：v1.8.10.3 加回的 runNormalClientBehavior 无调用点（死代码）。
@@ -991,38 +991,66 @@ async function createSession(token, sessionModel, forceCreate = false) {
   //    ⚠️ 实测（2026-08-10）：multi-session:1 创建的实例 chat 报 428 waiting_room_required
   //    （服务端 chat gate 不识别多会话实例），所以这里用单会话 + 预生成 instance-id：
   //    既保留桌面版客户端预生成实例的指纹，又确保 chat 能被识别。
-  const instId = crypto.randomUUID();
-  const r = await enqueueUp("POST", "/api/v1/freebuff/session", token, undefined,
-    { "x-freebuff-model": sessionModel, "x-freebuff-instance-id": instId, "Content-Type": "application/json" }, SESSION_TIMEOUT_MS);
-  recordAccountObservation(token, r.status, r.data, {
-    quota: r.data?.rateLimitsByModel || null,
-    uid: r.data?.uid || null,
-    retryAfterMs: r.data?.retryAfterMs,
-  });
-  if (r.status === 200 && r.data?.status === "active" && r.data?.instanceId) {
-    const s = normalizeSession(r.data, sessionModel);
-    sessCache.set(token + ":" + sessionModel, s);
-    return s;
-  }
-  if (r.status === 200 && r.data?.status === "queued" && r.data?.instanceId) {
-    const inst = r.data.instanceId;
-    for (let i = 0; i < 8; i++) {
-      await sleep(1500);
-      const q = await enqueueUp("GET", "/api/v1/freebuff/session", token, undefined, { "x-freebuff-instance-id": inst }, SESSION_TIMEOUT_MS);
-      recordAccountObservation(token, q.status, q.data, {
-        quota: q.data?.rateLimitsByModel || null,
-        uid: q.data?.uid || null,
-        retryAfterMs: q.data?.retryAfterMs,
-      });
-      if (q.status === 200 && q.data?.status === "active") {
-        const s = normalizeSession({ ...q.data, instanceId: q.data.instanceId || inst }, sessionModel);
-        sessCache.set(token + ":" + sessionModel, s);
-        return s;
-      }
+  //    ⚠️ POST 可能回 409 model_locked：forceCreate 跳过上面的 GET 检查、或 GET 非 200/非
+  //    active 时，上游仍可能有另一个模型的 session 占着单会话锁。旧逻辑在此直接抛错（既不删
+  //    也不重试），单账号池时上层只能回 502，且旧 session 继续占锁 —— 切模型会一直失败。
+  //    v1.8.11.1 补一次「GET 拿持锁 instanceId → DELETE 释放锁 → 重试 POST」，只重试一次，
+  //    仍 409 才抛给上层（冷却换号）。DELETE 上游会异步退 Freebucks（freebucksRefillPending）。
+  let modelUnlockRetried = false;
+  let r = null; // 循环外也要用（410 / 兜底 throw 分支在循环后）
+  for (;;) {
+    const instId = crypto.randomUUID();
+    r = await enqueueUp("POST", "/api/v1/freebuff/session", token, undefined,
+      { "x-freebuff-model": sessionModel, "x-freebuff-instance-id": instId, "Content-Type": "application/json" }, SESSION_TIMEOUT_MS);
+    recordAccountObservation(token, r.status, r.data, {
+      quota: r.data?.rateLimitsByModel || null,
+      uid: r.data?.uid || null,
+      retryAfterMs: r.data?.retryAfterMs,
+    });
+    if (r.status === 200 && r.data?.status === "active" && r.data?.instanceId) {
+      const s = normalizeSession(r.data, sessionModel);
+      sessCache.set(token + ":" + sessionModel, s);
+      return s;
     }
-    throw new Error("session stayed queued (retry later)");
+    if (r.status === 200 && r.data?.status === "queued" && r.data?.instanceId) {
+      const inst = r.data.instanceId;
+      for (let i = 0; i < 8; i++) {
+        await sleep(1500);
+        const q = await enqueueUp("GET", "/api/v1/freebuff/session", token, undefined, { "x-freebuff-instance-id": inst }, SESSION_TIMEOUT_MS);
+        recordAccountObservation(token, q.status, q.data, {
+          quota: q.data?.rateLimitsByModel || null,
+          uid: q.data?.uid || null,
+          retryAfterMs: q.data?.retryAfterMs,
+        });
+        if (q.status === 200 && q.data?.status === "active") {
+          const s = normalizeSession({ ...q.data, instanceId: q.data.instanceId || inst }, sessionModel);
+          sessCache.set(token + ":" + sessionModel, s);
+          return s;
+        }
+      }
+      throw new Error("session stayed queued (retry later)");
+    }
+    const mismatchMsg = "session_model_mismatch: " + String(r.data?.message || r.data?.error || "上游拒绝该模型");
+    if (r.status === 409 && !modelUnlockRetried) {
+      modelUnlockRetried = true;
+      const cur = await enqueueUp("GET", "/api/v1/freebuff/session", token, undefined,
+        DESKTOP_INCLUDE_RATE_LIMITS, SESSION_TIMEOUT_MS);
+      recordAccountObservation(token, cur.status, cur.data, {
+        quota: cur.data?.rateLimitsByModel || null,
+        uid: cur.data?.uid || null,
+        retryAfterMs: cur.data?.retryAfterMs,
+      });
+      if (cur.status === 200 && cur.data?.instanceId) {
+        if (typeof process !== "undefined" && process.env && process.env.FREEBUFF_DEBUG === "true") console.log(`[session] 409 model_locked, releasing ${cur.data.instanceId} (model=${cur.data.model || "?"}) then retry POST`);
+        await deleteUpstreamSession(token, cur.data.instanceId);
+        continue;
+      }
+      // GET 拿不到持锁 instanceId：无可删对象，退回原行为直接抛。
+      throw new Error(mismatchMsg);
+    }
+    if (r.status === 409) throw new Error(mismatchMsg);
+    break;
   }
-  if (r.status === 409) throw new Error("session_model_mismatch: " + String(r.data?.message || r.data?.error || "上游拒绝该模型"));
   // 410 model_unavailable：官方已下线该模型（admission 阶段拒绝，endsTheSession=false）。
   // 全局失败，抛专用错误让上层立即返回，不换号重试。
   if (r.status === 410 || hasExactErrorCode(r.data, "model_unavailable")) {
