@@ -1,6 +1,6 @@
 // freebuff2api Docker 宿主（v1.9.0）
 // - 把 Node http 请求适配成 CF 风格 Request 调 worker.js fetch handler
-// - /admin 可视化面板：首启随机密码（控制台打印，必须改密）、账号 CRUD（一账号一 socks5 出站）、连接测试
+// - 面板状态：首启固定密码 admin（登录后强制改密）、账号 CRUD（一账号一 socks5 出站）、连接测试
 // - 按账号 socks5 出站分流（undici Agent + socks CONNECT + 自管 TLS），经 setOutboundFetch 注入 worker
 // - 凭证持久化 credentials/admin.json（面板数据）；首次启动自动从 freebuff_credentials.json / FREEBUFF_TOKEN env 迁移
 import { createServer } from 'node:http';
@@ -239,10 +239,17 @@ function safeEqual(a, b) {
 const port = parseInt(process.env.PORT || '8787', 10);
 const host = process.env.HOST || '0.0.0.0';
 
+// 返回 true：handleAdmin 内所有 `return sendJson(...)` 需要让主路由判定「已处理」，
+// 否则面板响应后请求会再转发给 worker 二次写头（Cannot write headers after they are sent）
 function sendJson(res, status, obj, headers = {}) {
   const body = JSON.stringify(obj);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...headers });
-  res.end(body);
+  if (!res.headersSent) {
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...headers });
+    res.end(body);
+  } else if (!res.writableEnded) {
+    res.end();
+  }
+  return true;
 }
 function readBody(req) {
   return new Promise((resolveBody, reject) => {
