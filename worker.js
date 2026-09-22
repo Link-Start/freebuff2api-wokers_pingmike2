@@ -227,7 +227,10 @@ async function fetchSourceList(urls) {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), DYNAMIC_MODELS_FETCH_TIMEOUT_MS);
-      const resp = await fetch(url, { signal: ctrl.signal });
+      // accept-encoding: identity —— 宿主 server.js 顶层 import undici 会注册全局 dispatcher
+      // 劫持 Node 内置 fetch，导致 gzip 响应不被解压（拿到 \x1f\x8b 二进制），模型源解析必失败。
+      // 明确要求服务器不压缩，绕开该污染。业务出站走 doFetch(undici 自带 fetch) 不受影响。
+      const resp = await fetch(url, { signal: ctrl.signal, headers: { "accept-encoding": "identity" } });
       clearTimeout(timer);
       if (resp.ok) {
         const text = await resp.text();
@@ -306,7 +309,8 @@ async function tryReleaseFallback() {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), DYNAMIC_MODELS_FETCH_TIMEOUT_MS);
-      const resp = await fetch(url, { signal: ctrl.signal });
+      // 同上：identity 规避全局 dispatcher 污染导致的 gzip 未解压
+      const resp = await fetch(url, { signal: ctrl.signal, headers: { "accept-encoding": "identity" } });
       clearTimeout(timer);
       if (resp.ok) {
         const json = await resp.json();
