@@ -84,7 +84,7 @@ function hashPassword(password, salt) {
 
 function defaultConfig() {
   const salt = randomBytes(16).toString('hex');
-  const password = randomBytes(9).toString('base64url'); // 12 位随机
+  const password = 'admin'; // 固定初始密码，用户登录后自行修改
   return {
     salt,
     password_hash: hashPassword(password, salt),
@@ -113,10 +113,10 @@ function saveAdminConfig() {
   }
 }
 
-// 首次启动：生成密码 + 写一次性文件
+// 首次启动：固定初始密码 admin + 写一次性文件
 if (!existsSync(adminConfigPath)) {
   const salt = randomBytes(16).toString('hex');
-  const password = randomBytes(9).toString('base64url');
+  const password = 'admin'; // 固定初始密码，用户登录后自行修改
   firstBootPassword(password);
   adminConfig = {
     salt,
@@ -133,8 +133,8 @@ if (!existsSync(adminConfigPath)) {
   };
   saveAdminConfig();
   const pwPath = resolve(credDir, '.initial_password');
-  writeFileSync(pwPath, `管理员初始密码（登录 /admin 后请立即修改；改完可删除本文件）\n密码: ${password}\n`);
-  console.log('[admin] 首次启动：随机密码已写入', pwPath);
+  writeFileSync(pwPath, `管理员初始密码（登录 /admin 后请自行修改）\n密码: ${password}\n`);
+  console.log('[admin] 首次启动：初始密码文件已写入', pwPath);
   console.log(`[admin] 初始密码: ${password}`);
 }
 
@@ -349,7 +349,7 @@ async function render(){
   const app=$('#app');
   if(!state.login){
     app.innerHTML='<div class="login card"><h2>freebuff2api 管理登录</h2>'
-      +(state.must?'<div class="msg err">首次使用：请用启动日志/credentials/.initial_password 里的初始密码登录，然后修改密码。</div>':'')
+      +(state.must?'<div class="msg err">首次使用：请用初始密码 admin 登录，然后修改密码。</div>':'')
       +'<label>管理员密码</label><input id="pw" type="password" style="margin:6px 0 12px">'
       +'<button id="btnLogin" style="width:100%">登录</button><div class="msg" id="loginMsg"></div></div>';
     $('#btnLogin').onclick=doLogin;$('#pw').onkeydown=e=>{if(e.key==='Enter')doLogin()};
