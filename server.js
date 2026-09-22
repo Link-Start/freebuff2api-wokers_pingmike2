@@ -304,6 +304,52 @@ async function testAccountToken(token, proxyUrl) {
   } finally { clearTimeout(timer); }
 }
 
+// 额度查询：`include-unused-rate-limits: 1` 让 session 接口直接回吐 Freebucks
+// 快照（额度/价格/off-peak/重置时间），不用等 429 才知道还剩多少。
+async function queryQuota(token, proxyUrl) {
+  const dispatcher = socksAgent(proxyUrl || null);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const base = (buildEnv().CODEBUFF_API) || 'https://www.codebuff.com';
+    const r = await undiciFetch(base + '/api/v1/freebuff/session', {
+      dispatcher, signal: ctrl.signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'include-unused-rate-limits': '1',
+        'User-Agent': 'Freebuff-Admin-Check/1.0',
+      },
+    });
+    const text = await r.text();
+    let data = null; try { data = JSON.parse(text); } catch {}
+    if (!data) return { ok: false, status: r.status, raw: text.slice(0, 400) };
+    // 被封：{"error":"account_suspended","message":"..."} —— 没有 freebucks 字段
+    if (data.error || !data.freebucks) {
+      return {
+        ok: false, status: r.status, access_tier: data.accessTier,
+        banned: /suspend|banned/i.test(String(data.error || '') + String(data.status || '')),
+        error: data.message || data.error || data.status || '无额度数据',
+      };
+    }
+    const fb = data.freebucks;
+    return {
+      ok: r.ok, status: r.status,
+      access_tier: data.accessTier,
+      status_field: data.status,
+      balance: fb.balance,
+      daily: fb.daily || null,
+      wallet_balance: fb.wallet?.balance,
+      plan_id: fb.planId,
+      prices: fb.prices || {},
+      price_notices: fb.priceNotices || {},
+      off_peak: fb.offPeak || {},
+      price_changes: fb.priceChanges || [],
+    };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  } finally { clearTimeout(timer); }
+}
+
 // ---------------------------------------------------------------------------
 // /admin 面板
 // ---------------------------------------------------------------------------
@@ -373,6 +419,7 @@ async function render(){
           <div class="row" style="gap:4px">
             <button class="mini ghost act-test-proxy">测代理</button>
             <button class="mini ghost act-test-acct">测账号</button>
+            <button class="mini ghost act-quota">查额度</button>
             <button class="mini danger act-del">删除</button>
           </div>
         </div>
@@ -382,8 +429,9 @@ async function render(){
   app.innerHTML=\`
   <h1>freebuff2api 管理面板</h1><div class="sub">Docker 宿主 · 按账号 SOCKS5 出站分流 · 改动保存后立即生效（无需重启容器）</div>
   <div class="card"><h2>账号池（一个账号一条独立 socks5 出站）</h2>\${accts||'<div class="dim">暂无账号</div>'}
-    <div class="row" style="margin-top:8px"><button id="btnAdd">＋ 添加账号</button><button id="btnSaveAccts" class="ghost">保存账号</button></div>
+    <div class="row" style="margin-top:8px"><button id="btnAdd">＋ 添加账号</button><button id="btnSaveAccts" class="ghost">保存账号</button><button id="btnQuotas" class="ghost">💰 查全部额度</button></div>
     <div class="msg" id="acctMsg"></div>
+    <div id="quotaBox" class="dim" style="margin-top:8px"></div>
   </div>
   <div class="card"><h2>服务变量</h2>
     <div class="grid" style="grid-template-columns:140px 1fr 140px 1fr">
@@ -431,7 +479,14 @@ function collectAccts(){
 }
 function bind(){
   $('#btnAdd').onclick=()=>{state.accounts.push({name:'new-acct',token:'',token_masked:'新token',socks5:'',enabled:true});render()};
-  $('#btnSaveAccts').onclick=async()=>{try{const j=await api('/accounts',{method:'POST',body:JSON.stringify({accounts:collectAccts()})});state.accounts=j.accounts;$('#acctMsg').innerHTML='<span class="ok">已保存，立即生效</span>';render()}catch(e){$('#acctMsg').innerHTML='<span class="err">'+esc(e.message)+'</span>'}};
+  $('#btnQuotas').onclick=async()=>{
+    const box=$('#quotaBox');box.innerHTML='查询中…（逐账号直连上游）';
+    try{const j=await api('/quotas');
+      box.innerHTML='<table><tr><th>账号</th><th>额度</th></tr>'
+        +j.accounts.map(a=>'<tr><td>'+esc(a.name)+'<div class="dim mono">'+esc(a.token_masked||'')+'</div></td><td>'+renderQuota(a)+'</td></tr>').join('')
+        +'</table>';
+    }catch(e){box.innerHTML='<span class="err">'+esc(e.message)+'</span>'}};
+$('#btnSaveAccts').onclick=async()=>{try{const j=await api('/accounts',{method:'POST',body:JSON.stringify({accounts:collectAccts()})});state.accounts=j.accounts;$('#acctMsg').innerHTML='<span class="ok">已保存，立即生效</span>';render()}catch(e){$('#acctMsg').innerHTML='<span class="err">'+esc(e.message)+'</span>'}};
   $('#btnSaveSettings').onclick=async()=>{try{await api('/settings',{method:'POST',body:JSON.stringify({settings:{api_key:$('#s-apikey').value.trim(),codebuff_api:$('#s-api').value.trim(),relay_key:$('#s-relay').value.trim(),debug:$('#s-debug').value}})});$('#setMsg').innerHTML='<span class="ok">已保存，立即生效</span>'}catch(e){$('#setMsg').innerHTML='<span class="err">'+esc(e.message)+'</span>'}};
   $('#btnPw').onclick=async()=>{try{await api('/change_password',{method:'POST',body:JSON.stringify({old_password:$('#pw-old').value,new_password:$('#pw-new').value})});$('#pwMsg').innerHTML='<span class="ok">已修改</span>'}catch(e){$('#pwMsg').innerHTML='<span class="err">'+esc(e.message)+'</span>'}};
   $('#btnLogout').onclick=async(e)=>{e.preventDefault();await api('/logout',{method:'POST'});state.login=false;render()};
@@ -442,12 +497,52 @@ function bind(){
       const m=el.querySelector('.msg');m.textContent='测试中…';
       try{const j=await api('/test_proxy',{method:'POST',body:JSON.stringify({socks5:el.querySelector('.f-socks').value.trim()})});
         m.innerHTML=j.ok?('<span class="ok">✅ 出口IP '+esc(j.ip)+'（'+j.ms+'ms）</span>'):('<span class="err">❌ '+esc(j.error||'失败')+'</span>')}catch(e){m.innerHTML='<span class="err">'+esc(e.message)+'</span>'}};
+    el.querySelector('.act-quota').onclick=async()=>{
+      const m=el.querySelector('.msg');m.textContent='查询额度中…';
+      const tok=el.querySelector('.f-token').value.trim()||null;
+      try{const j=await api('/quota',{method:'POST',body:JSON.stringify({index:i,token:tok,socks5:el.querySelector('.f-socks').value.trim()})});
+        m.innerHTML=renderQuota(j)}catch(e){m.innerHTML='<span class="err">'+esc(e.message)+'</span>'}
+    };
     el.querySelector('.act-test-acct').onclick=async()=>{
       const m=el.querySelector('.msg');m.textContent='测试中…';
       const tok=el.querySelector('.f-token').value.trim()||null;
       try{const j=await api('/test_account',{method:'POST',body:JSON.stringify({index:i,token:tok,socks5:el.querySelector('.f-socks').value.trim()})});
         m.innerHTML=j.ok?('<span class="ok">✅ HTTP '+j.status+' '+esc(JSON.stringify(j.body))+'</span>'):('<span class="err">❌ HTTP '+(j.status||'')+' '+esc(j.error||JSON.stringify(j.body||''))+'</span>')}catch(e){m.innerHTML='<span class="err">'+esc(e.message)+'</span>'}};
   });
+}
+function fmtReset(iso){
+  if(!iso)return '';
+  const d=new Date(iso);if(isNaN(d))return esc(String(iso));
+  const p=n=>String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
+}
+function renderQuota(j){
+  if(!j)return '<span class="err">空返回</span>';
+  if(!j.ok&&!j.daily){
+    return '<span class="err">❌ '+(j.banned?'账号被封：':'')+esc(j.error||('HTTP '+(j.status||'')))+'</span>';
+  }
+  const d=j.daily||{};
+  const rem=Number(d.remaining||0), lim=Number(d.limit||0), spent=Number(d.spent||0);
+  const cls=rem>0?'ok':'err';
+  let s='<span class="'+cls+'">💰 Freebucks '+rem+'/'+lim
+    +(spent?'（已用 '+spent+'）':'')+' · 重置 '+fmtReset(d.resetAt)+'</span>';
+  s+=' · tier=<b>'+esc(j.access_tier||'?')+'</b>';
+  if(j.plan_id)s+=' · plan='+esc(j.plan_id);
+  const pr=j.prices||{};
+  const names=Object.keys(pr);
+  if(names.length){
+    const sorted=names.slice().sort((a,b)=>pr[a]-pr[b]);
+    s+='<div class="dim" style="margin-top:4px">可打次数：'
+      +sorted.map(function(m){
+        const cost=pr[m];
+        const times=cost>0?Math.floor(rem/cost):rem;
+        return '<span class="'+(times>0?'ok':'err')+'" title="'+esc(m)+'（'+cost+'）">'+esc(m.split('/').pop())+'×'+times+'</span>';
+      }).join(' · ')+'</div>';
+    const notices=j.price_notices||{};
+    const np=Object.keys(notices).map(function(m){return esc(m.split('/').pop())+': '+esc(notices[m])});
+    if(np.length)s+='<div class="dim" style="margin-top:2px">⚠ '+np.join(' · ')+'</div>';
+  }
+  return s;
 }
 async function loadHealth(){
   try{const j=await api('/status');
@@ -574,6 +669,26 @@ async function handleAdmin(req, res, url) {
       if (!tok) return sendJson(res, 400, { error: '无 token（先填写保存或传 token）' });
       const r = await testAccountToken(tok, socks5 !== undefined ? socks5 : acc?.socks5);
       return sendJson(res, 200, r);
+    }
+
+    if (apiPath === '/quota' && req.method === 'POST') {
+      const { index, token, socks5 } = await readJson(req);
+      const acc = getAccounts()[Number(index)];
+      const tok = (token && String(token).trim()) || acc?.token;
+      if (!tok) return sendJson(res, 400, { error: '无 token（先填写保存或传 token）' });
+      const r = await queryQuota(tok, socks5 !== undefined ? socks5 : acc?.socks5);
+      return sendJson(res, 200, r);
+    }
+
+    if (apiPath === '/quotas' && req.method === 'GET') {
+      const list = getAccounts();
+      const out = [];
+      for (let i = 0; i < list.length; i++) {
+        const a = list[i];
+        if (!a.token) { out.push({ name: a.name, ok: false, error: '无 token' }); continue; }
+        out.push({ name: a.name, token_masked: maskToken(a.token), ...(await queryQuota(a.token, a.socks5)) });
+      }
+      return sendJson(res, 200, { accounts: out });
     }
 
     if (apiPath === '/status' && req.method === 'GET') {

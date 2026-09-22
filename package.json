@@ -1,6 +1,6 @@
 {
   "name": "freebuff2api-container",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "type": "module",
   "private": true,
   "description": "freebuff2api-wokers v1.8.11.0 worker.js + /admin panel + per-account socks5 outbound (Node container)",
