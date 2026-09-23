@@ -75,20 +75,33 @@ Freebuff 免费版的额度单位叫 **Freebucks** —— 一个**按次扣费�
 - `deepseek/deepseek-v4-pro` 实测 `409 model_unavailable`，官方已下线
 - `freebucks.priceNotices` 带涨价/调价提醒，面板渲染成 `⚠ 模型: 说明`
 
-### ⚠️ 两个 limit 并存：40 才是真闸
+### ⚠️ 两个 limit 并存：以快照 `daily.limit` 为准
 
 上游同时报**两个不同的数**，别搞混：
 
-| 来源 | 数字 | 含义 |
+| 来源 | 数字（会变） | 含义 |
 |---|---|---|
-| **429 响应体** `limit` | **40** | **实际拦截你的闸** —— `recentCount ≥ 40` 就 429 |
-| **GET 快照** `daily.limit` | 100 | 钱包日限额（`spent` 对着它算） |
+| **429 响应体** `limit` | 40 / 25 … | 撞闸当日的闸值 —— `recentCount ≥ limit` 就 429 |
+| **GET 快照** `daily.limit` | 100 / 25 … | 钱包日限额（`spent` 对着它算） |
 
-**别拿 429 的 40 去减 `recentCount` 推余额**，只信快照的 `daily.remaining` + `balance`。
+**别拿 429 的 limit 去减 `recentCount` 推余额**，只信快照的 `daily.remaining` + `balance`。
+
+### accessTier 与「新号只有 25 点」
+
+额度闸是**按账号分档**的，`accessTier` 不同、日上限不同：
+
+| accessTier | 日上限（快照 `daily.limit`） | 说明 |
+|---|---|---|
+| `full` | 曾实测 100（429 闸 40） | 2026-09-22 前的老号实测值，官方可随时调 |
+| `limited` | **25** | **新注册账号的默认档** —— 刚注册的号只有 25 点/天，不是 bug |
+
+实测（2026-09-23）：新号注册即 `accessTier: "limited"`、`daily.limit: 25`，glm-5.3-flash 单价 5 点/次 ≈ 一天 5 次。**档位跟 IP 国别无关**（美国直连的账号照样降档），由上游按账号信任度判定，**无法通过换 socks5 出口提额**。老号也可能被从 `full` 降到 `limited`。
 
 ### 重置时间
 
 `resetAt` = **太平洋时间午夜** → **北京时间次日 15:00**（例：`2026-09-23T07:00:00Z` = 北京 2026-09-23 15:00）。
+
+> 📌 **锚点小知识（GitHub Markdown）**：含 emoji 的标题生成锚点时，GitHub 只删 emoji 基本码位、保留变体选择符 U+FE0F。修锚链接时以渲染 HTML 的真实 id 为准。
 
 ### 官方 cap 的由来
 
@@ -101,7 +114,7 @@ Freebuff 免费版的额度单位叫 **Freebucks** —— 一个**按次扣费�
 ### 扩量路径
 
 1. **付费档** —— `$8/月` → `150 Freebucks/天`（`wallet` 里能看到）
-2. **多账号轮换** —— 本项目一账号一 socks5 的架构**天然支持**，每个号一份独立额度，在面板里加号即可
+2. **多账号轮换** —— 本项目一账号一 socks5 的架构**天然支持**，每个号一份独立额度，在面板里加号即可。**注意：新号默认只有 `limited` 档 25 点/天**（见上文「accessTier 与新号额度」），多号是乘以 25，不是乘以 100
 3. **挑便宜模型** —— 优先 `glm-5.3-flash` / `kimi-k3-eco`（单价 5），贵的模型留到 off-peak
 
 ### 常见误区
@@ -112,6 +125,7 @@ Freebuff 免费版的额度单位叫 **Freebucks** —— 一个**按次扣费�
 | `HTTP 502: create session failed: 429 ...` | 上游额度耗尽，等 `resetAt` |
 | `409 model_locked` | 会话锁冲突，**不是额度问题** —— Worker 会自动「删旧建新」重试（v1.8.11.1） |
 | `429` | **不等于封禁**，只是额度；`account_suspended` 才是封号（终态，不可逆） |
+| 新号怎么只有 25 点 | 新账号默认 `limited` 档、25/天，**不是 bug 也不是 IP 问题**（见「accessTier 与新号额度」） |
 | 额度掉得特别快 | 诊断性反复建 session 会连扣 —— **每次 POST 都是真扣费** |
 
 
