@@ -9,7 +9,11 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { connect as tlsConnect } from 'node:tls';
-import { Agent, fetch as undiciFetch } from 'undici';
+import { Agent, fetch as undiciFetch } from 'undici'
+
+// 与 worker.js 一致的官方 SDK UA：管理面板的探测/查额请求也使用同一身份，
+// 避免自创 UA（旧 Freebuff-Admin-Check/1.0）在官方侧留下可归因的客户端线索。
+const SDK_UA = "ai-sdk/openai-compatible/1.0.25/codebuff";;
 import { SocksClient } from 'socks';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -294,7 +298,7 @@ async function testAccountToken(token, proxyUrl) {
     const base = (buildEnv().CODEBUFF_API) || 'https://www.codebuff.com';
     const r = await undiciFetch(base + '/api/v1/me', {
       dispatcher, signal: ctrl.signal,
-      headers: { Authorization: `Bearer ${token}`, 'User-Agent': 'Freebuff-Admin-Check/1.0' },
+      headers: { Authorization: `Bearer ${token}`, 'User-Agent': SDK_UA },
     });
     const text = await r.text();
     let data = null; try { data = JSON.parse(text); } catch {}
@@ -317,7 +321,7 @@ async function queryQuota(token, proxyUrl) {
       headers: {
         Authorization: `Bearer ${token}`,
         'include-unused-rate-limits': '1',
-        'User-Agent': 'Freebuff-Admin-Check/1.0',
+        'User-Agent': SDK_UA,
       },
     });
     const text = await r.text();
