@@ -1,4 +1,4 @@
-# Freebuff 可用模型（2026-09-23 23:52:51 北京时间）
+# Freebuff 可用模型（2026-09-24 04:55:04 北京时间）
 
 > 自动生成 · 来源：[CodebuffAI/freebuff](https://github.com/CodebuffAI/freebuff) main · 更新频率：每 6 小时
 
@@ -29,10 +29,11 @@
 - `deepseek/deepseek-v4.1-pro` —— deepseek/deepseek-v4.1-pro
 - `mimo/mimo-v2.5` —— MiMo V2.5（轻量高效，适合快速任务）
 - `stealth/ox-alpha` —— stealth/ox-alpha
+- `stealth/space-bunny-alpha` —— stealth/space-bunny-alpha
 - `z-ai/glm-5.3-flash` —— z-ai/glm-5.3-flash
 
 ## 独立池（GLM 推荐解锁）
 
 
 ---
-共 23 个模型 · 上次更新：2026-09-23 23:52:51
+共 24 个模型 · 上次更新：2026-09-24 04:55:04
