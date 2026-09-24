@@ -13,7 +13,7 @@ import { Agent, fetch as undiciFetch } from 'undici'
 
 // 与 worker.js 一致的官方 SDK UA：管理面板的探测/查额请求也使用同一身份，
 // 避免自创 UA（旧 Freebuff-Admin-Check/1.0）在官方侧留下可归因的客户端线索。
-const SDK_UA = "ai-sdk/openai-compatible/1.0.25/codebuff";;
+const SDK_UA = "ai-sdk/openai-compatible/1.0.25/codebuff";
 import { SocksClient } from 'socks';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -308,7 +308,8 @@ async function testAccountToken(token, proxyUrl) {
   } finally { clearTimeout(timer); }
 }
 
-// 额度查询：`include-unused-rate-limits: 1` 让 session 接口直接回吐 Freebucks
+// 额度查询：`x-freebuff-include-unused-rate-limits: 1` 让 session 接口直接回吐 Freebucks
+//（v1.8.12.0 对齐官方 FREEBUFF_INCLUDE_UNUSED_RATE_LIMITS_HEADER 规范名，旧裸名头官方不识别）
 // 快照（额度/价格/off-peak/重置时间），不用等 429 才知道还剩多少。
 async function queryQuota(token, proxyUrl) {
   const dispatcher = socksAgent(proxyUrl || null);
@@ -320,7 +321,7 @@ async function queryQuota(token, proxyUrl) {
       dispatcher, signal: ctrl.signal,
       headers: {
         Authorization: `Bearer ${token}`,
-        'include-unused-rate-limits': '1',
+        'x-freebuff-include-unused-rate-limits': '1',
         'User-Agent': SDK_UA,
       },
     });

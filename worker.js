@@ -1,7 +1,7 @@
 const CODEBUFF_API = "https://www.codebuff.com";
 const DEFAULT_MODEL = "mimo/mimo-v2.5";
 const DEFAULT_API_KEY = "freebuff-default-key";
-const VERSION = "1.8.11.1";
+const VERSION = "1.8.12.0";
 const CONTEXT_PRUNER_AGENT = "context-pruner";
 const SDK_UA = "ai-sdk/openai-compatible/1.0.25/codebuff";
 // 广告链已于 v1.8.11.0 移除：v1.8.10.3 加回的 runNormalClientBehavior 无调用点（死代码）。
@@ -141,7 +141,9 @@ function parseModelPools(source, modelIdConstants) {
     const items = [];
     const itemRe = /\.\.\.([A-Z0-9_]+)|'([^']*)'|"([^"]*)"|([A-Za-z0-9_]+)/g;
     let im;
-    while ((im = itemRe.exec(pm[2])) !== null) {
+    // v1.8.12.0：poolRe 有 3 个捕获组（1=池名 2=Object.freeze( 3=items），
+    // 旧代码误读 pm[2]（= freeze 组或 null）→ items 恒空、动态 premium 池解析为 0。
+    while ((im = itemRe.exec(pm[3])) !== null) {
       const spread = im[1];
       const lit = im[2] ?? im[3];
       const expr = im[4];
@@ -933,10 +935,12 @@ function behaviorDue(key) {
 }
 
 // 稳定指纹：token 派生（官方 enhanced- 前缀 + 哈希）。
-// v1.8.11.0 起 client_id 语义对齐官方 SDK：client_id = clientSessionId（会话级）。
-// conversationSessionId(token, salt) 在「账号 × 30 分钟窗口」内恒定、跨窗口更换，
-// 替代旧的 全账号恒定 stableFingerprint("session")（跨会话不换 = 异常指纹，
-// 官方 looksLikeProxyClientId 专抓固定 client_id 模式的公开代理）。
+// v1.8.12.0 协议对齐（官方 sdk/src/run.ts + sdk/src/impl/llm.ts 实证）：
+//   - client_id = promptId = Math.random().toString(36).substring(2, 15)
+//     → 每个 prompt 新随机 base36（见 buildUpstreamPayload），不再用稳定指纹；
+//   - trace_session_id = previousRun?.traceSessionId ?? crypto.randomUUID()
+//     → 同一对话跨轮复用、新对话才换 → 由 traceSessionId 按窗口派生。
+// stableFingerprint 降级为 trace UUID 的哈希底座。
 function stableFingerprint(token) {
   let h1 = 0x811c9dc5, h2 = 0x01000193;
   const s = "freebuff-fp-v2:" + token;
@@ -948,11 +952,16 @@ function stableFingerprint(token) {
   return "enhanced-" + h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
 }
 
-// 会话级 client_id：账号 token + 30 分钟滚动窗口 → 稳定增强指纹。
-// 同一会话（窗口内）恒定，新窗口自然轮换，与官方 clientSessionId 语义一致。
-function conversationSessionId(token) {
+// 会话级 trace_session_id（对齐官方 sdk/src/run.ts:1031 previousRun?.traceSessionId ?? crypto.randomUUID()）：
+// 官方同一对话跨轮复用同一 trace id、新对话才 randomUUID。代理无状态 →
+// 「账号 × 30 分钟滚动窗口」内派生恒定 UUID v4 形状，跨窗口轮换 ≈ 新对话。
+function traceSessionId(token) {
   const window = Math.floor(Date.now() / (30 * 60 * 1000));
-  return stableFingerprint(token + "|cs|" + window);
+  const hex = stableFingerprint(token + "|ts1|" + window).slice(9)
+            + stableFingerprint(token + "|ts2|" + window).slice(9); // 32 hex
+  const variant = "89ab"[parseInt(hex[16], 16) % 4];
+  return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-4" + hex.slice(13, 16)
+       + "-" + variant + hex.slice(17, 20) + "-" + hex.slice(20, 32);
 }
 
 async function createSession(token, sessionModel, forceCreate = false) {
@@ -1289,6 +1298,11 @@ function buildUpstreamPayload(params, mc, sess, runId, token) {
   payload.model = mc.upstream;
   payload.messages = normalizeMessages(params.messages);
   payload.stream = true;
+  // 官方 SDK 恒发 stream_options.include_usage=true（model-provider.ts:413
+  // includeUsage:true + 官方测试 official-include-usage-default-true），
+  // 覆盖客户端显式值以对齐上游请求形状；usage-only chunk 由
+  // streamToNonStream/anthropicStream 在 choice 检查前提取（v1.8.12.0）。
+  payload.stream_options = { include_usage: true };
   if (!payload.stop) payload.stop = ['"cb_easp"'];
   payload.provider = { data_collection: "deny" };
   // 工具集出站伪装：客户端工具统一挂 MCP 命名空间前缀（避开官方外域工具名表），
@@ -1306,13 +1320,18 @@ function buildUpstreamPayload(params, mc, sess, runId, token) {
       payload.tool_choice = { ...payload.tool_choice, function: { ...payload.tool_choice.function, name: toWireToolName(payload.tool_choice.function.name) } };
     }
   }
+  // client_id = 官方 promptId（run.ts:896 Math.random().toString(36).substring(2,15)，
+  // 每 prompt 新随机、同一 run 内 root/子 run 共用）→ 请求级 memo 于 params.__promptId。
+  if (!params.__promptId) params.__promptId = Math.random().toString(36).substring(2, 15);
+  // 键序对齐官方 llm.ts getProviderMetadata：freebuff_* extraKeys → trace_session_id
+  // → run_id → client_id → cost_mode；freebuff_reasoning_effort 仅在有 effort 时发
+  //（use-send-message.ts:675：null 不发），官方服务端读该键 re-clamp（CLI 测试实证）。
   payload.codebuff_metadata = {
     freebuff_instance_id: sess.instanceId,
-    trace_session_id: crypto.randomUUID(),
+    ...(payload.reasoning_effort !== undefined && { freebuff_reasoning_effort: payload.reasoning_effort }),
+    trace_session_id: traceSessionId(token),
     run_id: runId,
-    // 官方 SDK：client_id = clientSessionId（会话级稳定标识，新会话换新）。
-    // v1.8.11.0：账号 × 30 分钟滚动窗口派生，窗口内恒定、跨窗口轮换。
-    client_id: conversationSessionId(token),
+    client_id: params.__promptId,
     cost_mode: "free",
   };
   return payload;
@@ -1974,6 +1993,12 @@ async function streamToNonStream(upstreamBody, upstreamModel) {
       if (payload === "" || payload === "[DONE]") continue;
       try {
         const obj = unwrapData(JSON.parse(payload));
+        // v1.8.12.0：id/model/usage 必须在 choice 检查前提取——官方恒发
+        // include_usage:true，收尾是 choices:[] 的 usage-only chunk，
+        // 旧顺序在其上 continue → usage 恒丢。
+        if (obj?.id) id = obj.id;
+        if (obj?.model) model = obj.model;
+        if (obj?.usage) usage = obj.usage;
         const choice = obj?.choices?.[0];
         if (!choice) continue;
         const delta = choice.delta || {};
@@ -1993,9 +2018,6 @@ async function streamToNonStream(upstreamBody, upstreamModel) {
           }
         }
         if (choice.finish_reason) finishReason = choice.finish_reason;
-        if (obj.id) id = obj.id;
-        if (obj.model) model = obj.model;
-        if (obj.usage) usage = obj.usage;
       } catch {}
     }
   }
@@ -2141,11 +2163,12 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc, onCompl
           if (payload === "" || payload === "[DONE]") continue;
           try {
             const obj = unwrapData(JSON.parse(payload));
+            // v1.8.12.0：usage-only chunk（choices:[]）在 continue 前就要提取。
+            if (obj?.model) model = obj.model;
+            if (obj?.usage) usage = obj.usage;
             const choice = obj?.choices?.[0];
             if (!choice) continue;
             const delta = choice.delta || {};
-                if (obj.model) model = obj.model;
-                if (obj.usage) usage = obj.usage;
 
             // 工具调用增量（chat 格式 delta.tool_calls[]）
             if (Array.isArray(delta.tool_calls)) {
@@ -2242,6 +2265,9 @@ async function responsesToNonStream(upstreamBody, mc) {
       if (payload === "" || payload === "[DONE]") continue;
       try {
         const obj = unwrapData(JSON.parse(payload));
+        // v1.8.12.0：usage-only chunk（choices:[]）在 continue 前就要提取。
+        if (obj?.model) model = obj.model;
+        if (obj?.usage) usage = obj.usage;
         const choice = obj?.choices?.[0];
         if (!choice) continue;
         const delta = choice.delta || {};
@@ -2267,8 +2293,6 @@ async function responsesToNonStream(upstreamBody, mc) {
             if (fn.arguments) item.args += fn.arguments;
           }
         }
-        if (obj.model) model = obj.model;
-        if (obj.usage) usage = obj.usage;
       } catch {}
     }
   }
